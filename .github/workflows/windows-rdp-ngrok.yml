@@ -1,0 +1,215 @@
+name: 🚀 WINDOWS RDP - NGROK
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: '🕐 Thời gian sử dụng'
+        required: false
+        default: '5h40m'
+        type: choice
+        options:
+        - '1h'
+        - '3h' 
+        - '5h40m'
+      config:
+        description: '⚙️ Cấu hình VPS'
+        required: false
+        default: 'basic'
+        type: choice
+        options:
+        - 'basic'
+        - 'standard'
+        - 'premium'
+
+jobs:
+  Windows-RDP-Ngrok:
+    runs-on: windows-latest
+    timeout-minutes: 340
+    
+    steps:
+      - name: 🎯 KHỞI ĐỘNG HỆ THỐNG
+        run: |
+          Write-Host ""
+          Write-Host "🪟 WINDOWS RDP SERVER - NGROK" -ForegroundColor Yellow
+          Write-Host "⚡ Public Access via Ngrok" -ForegroundColor Green
+          Write-Host "🕒 Thời gian: ${{ github.event.inputs.duration }}" -ForegroundColor Magenta
+          Write-Host "⚙️ Cấu hình: ${{ github.event.inputs.config }}" -ForegroundColor Cyan
+          Write-Host ""
+
+      - name: 🔧 CẤU HÌNH RDP
+        run: |
+          Write-Host "🛠️ ĐANG CẤU HÌNH RDP" -ForegroundColor Yellow
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
+          
+          # Keep-alive settings to prevent disconnection
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "KeepAliveEnable" -Value 1 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "KeepAliveInterval" -Value 1 -Force
+          
+          netsh advfirewall firewall add rule name="RDP-Ngrok" dir=in action=allow protocol=TCP localport=3389 profile=any
+          
+          Set-Service -Name TermService -StartupType Automatic
+          Start-Service -Name TermService
+          Write-Host "✅ RDP đã được cấu hình với keep-alive" -ForegroundColor Green
+
+      - name: 👤 TẠO TÀI KHOẢN
+        run: |
+          Write-Host "👤 ĐANG TẠO TÀI KHOẢN" -ForegroundColor Yellow
+          
+          function New-Password {
+              $chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789'
+              -join ((1..10) | ForEach-Object { $chars[(Get-Random -Maximum $chars.Length)] })
+          }
+          
+          $password = New-Password
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          
+          Remove-LocalUser -Name "AISTV-NGROK" -ErrorAction SilentlyContinue
+          New-LocalUser -Name "AISTV-NGROK" -Password $securePass -AccountNeverExpires -Description "AI STV Ngrok Account"
+          Set-LocalUser -Name "AISTV-NGROK" -PasswordNeverExpires $true
+          
+          Add-LocalGroupMember -Group "Administrators" -Member "AISTV-NGROK"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "AISTV-NGROK"
+          Enable-LocalUser -Name "AISTV-NGROK"
+          
+          echo "RDP_USER=AISTV-NGROK" >> $env:GITHUB_ENV
+          echo "RDP_PASS=$password" >> $env:GITHUB_ENV
+          echo "$password" > $env:TEMP\rdp_password.txt
+          
+          Write-Host "✅ Tài khoản: AISTV-NGROK đã sẵn sàng" -ForegroundColor Green
+
+      - name: 🌐 THIẾT LẬP NGROK TUNNEL
+        env:
+          NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
+        run: |
+          Write-Host "🌐 ĐANG THIẾT LẬP NGROK TUNNEL" -ForegroundColor Yellow
+          
+          # Download Ngrok
+          $ngrokZip = "$env:TEMP\ngrok.zip"
+          Invoke-WebRequest -Uri "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip" -OutFile $ngrokZip
+          Expand-Archive -Path $ngrokZip -DestinationPath "$env:TEMP\ngrok" -Force
+          Remove-Item $ngrokZip -Force
+          Write-Host "│ ✅ Đã tải Ngrok" -ForegroundColor Green
+          
+          # Authenticate Ngrok
+          & "$env:TEMP\ngrok\ngrok.exe" authtoken $env:NGROK_AUTH_TOKEN
+          Write-Host "│ ✅ Đã xác thực Ngrok" -ForegroundColor Green
+          
+          # Start Ngrok tunnel trong background
+          Start-Process -FilePath "$env:TEMP\ngrok\ngrok.exe" -ArgumentList "tcp", "3389", "--log=stdout" -NoNewWindow -RedirectStandardOutput "$env:TEMP\ngrok.log"
+          Write-Host "│ ✅ Đã khởi động Ngrok tunnel" -ForegroundColor Green
+          
+          # Chờ Ngrok khởi động
+          Start-Sleep -Seconds 10
+          
+          # Lấy public URL từ Ngrok API
+          $ngrokUrl = $null
+          for($i=0; $i -lt 20; $i++) {
+              try {
+                  $response = Invoke-RestMethod -Uri "http://localhost:4040/api/tunnels"
+                  $tunnel = $response.tunnels | Where-Object { $_.proto -eq "tcp" } | Select-Object -First 1
+                  if ($tunnel -and $tunnel.public_url) {
+                      $ngrokUrl = $tunnel.public_url -replace 'tcp://', ''
+                      echo "NGROK_URL=$ngrokUrl" >> $env:GITHUB_ENV
+                      Write-Host "✅ Ngrok URL: $ngrokUrl" -ForegroundColor Green
+                      break
+                  }
+              } catch {
+                  # Retry
+              }
+              Start-Sleep -Seconds 3
+          }
+          
+          if (-not $ngrokUrl) {
+              Write-Host "❌ Không thể lấy Ngrok URL" -ForegroundColor Red
+              exit 1
+          }
+
+      - name: 📤 GỬI THÔNG TIN VỀ WEBSITE
+        run: |
+          Write-Host "📤 ĐANG GỬI THÔNG TIN VỀ WEBSITE..." -ForegroundColor Yellow
+          
+          $password = Get-Content $env:TEMP\rdp_password.txt
+          $repoName = "${{ github.repository }}".Split('/')[-1]
+          
+          $body = @{
+              repoName = $repoName
+              ngrokUrl = $env:NGROK_URL
+              rdpUser = "AISTV-NGROK"
+              rdpPassword = $password
+          } | ConvertTo-Json
+          
+          try {
+              Invoke-RestMethod -Uri "https://wxqxriwodkgzpzqaxigp.supabase.co/functions/v1/update-rdp-info" -Method POST -Body $body -ContentType "application/json" -Headers @{
+                  "apikey" = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Ind4cXhyaXdvZGtnenB6cWF4aWdwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjM4Nzk0MDcsImV4cCI6MjA3OTQ1NTQwN30.u8piIXHELUvdN9klNTFhnBFrD0lzwMg0EMPcrz1Wfh8"
+                  "Authorization" = "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Ind4cXhyaXdvZGtnenB6cWF4aWdwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjM4Nzk0MDcsImV4cCI6MjA3OTQ1NTQwN30.u8piIXHELUvdN9klNTFhnBFrD0lzwMg0EMPcrz1Wfh8"
+              }
+              Write-Host "✅ Đã gửi thông tin về website!" -ForegroundColor Green
+          } catch {
+              Write-Host "⚠️ Lỗi gửi thông tin nhưng VPS vẫn hoạt động" -ForegroundColor Yellow
+          }
+
+      - name: 🎉 THÔNG TIN KẾT NỐI
+        run: |
+          $password = Get-Content $env:TEMP\rdp_password.txt
+          
+          Write-Host ""
+          Write-Host "┌───────────────────────────────────────────┐" -ForegroundColor Cyan
+          Write-Host "│       🎉 NGROK RDP ĐÃ SẴN SÀNG!          │" -ForegroundColor Cyan
+          Write-Host "├───────────────────────────────────────────┤" -ForegroundColor Cyan
+          Write-Host "│ 🌐  URL: $env:NGROK_URL" -ForegroundColor White
+          Write-Host "│ 👤  User: AISTV-NGROK" -ForegroundColor White
+          Write-Host "│ 🔐  Password: $password" -ForegroundColor White
+          Write-Host "│ 🌍  Truy cập từ bất kỳ đâu!" -ForegroundColor White
+          Write-Host "├───────────────────────────────────────────┤" -ForegroundColor Cyan
+          Write-Host "│ 💡  Hướng dẫn:                            │" -ForegroundColor Cyan
+          Write-Host "│   1. Mở Remote Desktop Connection         │" -ForegroundColor Yellow
+          Write-Host "│   2. Nhập: $env:NGROK_URL                 │" -ForegroundColor Yellow
+          Write-Host "│   3. User: AISTV-NGROK | Password: trên  │" -ForegroundColor Yellow
+          Write-Host "└───────────────────────────────────────────┘" -ForegroundColor Cyan
+
+      - name: ⏳ DUY TRÌ PHIÊN LÀM VIỆC
+        run: |
+          $durationInput = "${{ github.event.inputs.duration }}"
+          switch ($durationInput) {
+              "1h" { $totalMinutes = 60 }
+              "3h" { $totalMinutes = 180 }
+              "5h40m" { $totalMinutes = 340 }
+          }
+          
+          Write-Host "🔄 BẮT ĐẦU DUY TRÌ PHIÊN..." -ForegroundColor Yellow
+          Write-Host "💎 Windows RDP via Ngrok" -ForegroundColor Green
+          Write-Host "🔗 Kết nối: $env:NGROK_URL" -ForegroundColor Green
+          
+          # Start a background job to keep system active
+          $keepAliveJob = Start-Job -ScriptBlock {
+              while($true) {
+                  Get-Date | Out-Null
+                  Start-Sleep -Seconds 60
+              }
+          }
+          
+          # Count down with monitoring
+          for($i=$totalMinutes; $i -gt 0; $i--) {
+              $hours = [math]::Floor($i / 60)
+              $mins = $i % 60
+              
+              # Check if Ngrok is still running
+              $ngrokProcess = Get-Process -Name ngrok -ErrorAction SilentlyContinue
+              if (-not $ngrokProcess) {
+                  Write-Host "`n⚠️ Ngrok đã dừng! Khởi động lại..." -ForegroundColor Red
+                  Start-Process -FilePath "ngrok" -ArgumentList "tcp", "3389", "--log=stdout" -RedirectStandardOutput "C:\ngrok.log" -WindowStyle Hidden
+              }
+              
+              Write-Host "`r⏱️ Còn lại: ${hours}h ${mins}m   " -NoNewline -ForegroundColor Blue
+              Start-Sleep -Seconds 60
+          }
+          
+          # Stop keepalive job
+          Stop-Job -Job $keepAliveJob -ErrorAction SilentlyContinue
+          Remove-Job -Job $keepAliveJob -ErrorAction SilentlyContinue
+          
+          Write-Host ""
+          Write-Host "🎯 ĐÃ HẾT THỜI GIAN - TỰ ĐỘNG DỪNG!" -ForegroundColor Green
